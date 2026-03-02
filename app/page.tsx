@@ -11,7 +11,7 @@ export default function Home() {
                     <h1 className="hero-title">
                         Secure Your AI.
                         <br />
-                        <span className="gradient-text">Before Attackers Do.</span>
+                        <span className="gradient-text">Before Attackers get in.</span>
                     </h1>
                     <p className="hero-subtitle">
                         An AI security platform powered by phi3:mini. Simulate emoji

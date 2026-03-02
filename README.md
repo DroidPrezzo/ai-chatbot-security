@@ -6,6 +6,21 @@ An AI security platform that lets you chat with phi3:mini, simulate emoji inject
 ![TypeScript](https://img.shields.io/badge/TypeScript-5-blue)
 ![PyRIT](https://img.shields.io/badge/PyRIT-0.11-purple)
 
+## Screenshots
+
+### 1. Dashboard
+![Dashboard](/screenshots/dashboard.png)
+
+### 2. Attack Lab
+![Attack Laboratory](/screenshots/attack-lab.png)
+
+### 3. Risk Report
+![Risk Report](/screenshots/risk-report1.png)
+![Risk Report](/screenshots/risk-report2.png)
+
+### 4. Chat Interface with Defense Toggle
+![Chat Interface](/screenshots/chat-interface.png)
+
 ## Features
 
 - **AI Chatbot** — Chat with phi3:mini via Ollama with real-time streaming
