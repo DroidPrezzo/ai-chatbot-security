@@ -8,4 +8,5 @@ next-env.d.ts
 __pycache__/
 *.pyc
 attack-server/results/
+.venv/
 .vercel/
