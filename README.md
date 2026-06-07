@@ -1,4 +1,4 @@
-# ShieldAI — AI Chatbot Security Platform
+# YewoAI — AI Chatbot Security Platform
 
 An AI security platform that lets you chat with phi3:mini, simulate emoji injection attacks using PyRIT, apply defense layers, and generate visual risk reports.
 
