@@ -13,6 +13,7 @@ Start with: uvicorn server:app --host 0.0.0.0 --port 8000 --reload
 import asyncio
 import json
 import os
+import tempfile
 import time
 from datetime import datetime
 
@@ -25,13 +26,10 @@ from pydantic import BaseModel
 # These are only used when PyRIT is installed.  The server gracefully
 # degrades to built-in converters if PyRIT is not available.
 try:
-    from pyrit.prompt_converter import (
+    from pyrit.prompt_converter import (  # type: ignore[import-untyped]
         EmojiConverter,
         EcojiConverter,
         UnicodeSubConverter,
-    )
-    from pyrit.prompt_converter.token_smuggling import (
-        VariationSelectorSmugglerConverter,
     )
     PYRIT_AVAILABLE = True
 except ImportError:
@@ -40,11 +38,16 @@ except ImportError:
 
 app = FastAPI(title="PyRIT Attack Server", version="1.0.0")
 
+# ─── CORS ────────────────────────────────────────────────────────
+# Read allowed origins from env (comma-separated); default to localhost:3000
+_cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000")
+ALLOWED_ORIGINS = [o.strip() for o in _cors_origins.split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Accept"],
 )
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
@@ -134,10 +137,6 @@ async def convert_with_pyrit(text: str, converter_name: str) -> str:
                 return result.output_text
             elif converter_name == "unicode_sub":
                 c = UnicodeSubConverter()
-                result = await c.convert_async(prompt=text)
-                return result.output_text
-            elif converter_name == "variation_selector":
-                c = VariationSelectorSmugglerConverter()
                 result = await c.convert_async(prompt=text)
                 return result.output_text
         except Exception:
@@ -232,15 +231,26 @@ async def run_attacks(req: AttackRequest):
             "timestamp": datetime.utcnow().isoformat(),
         })
 
-    # Persist to file
+    # Persist to file (atomic write to prevent corruption)
     os.makedirs(os.path.dirname(RESULTS_FILE), exist_ok=True)
     existing = []
     if os.path.exists(RESULTS_FILE):
         with open(RESULTS_FILE) as f:
             existing = json.load(f)
     existing.extend(results)
-    with open(RESULTS_FILE, "w") as f:
-        json.dump(existing, f, indent=2)
+
+    # Write to temp file then atomically rename
+    dir_name = os.path.dirname(RESULTS_FILE)
+    fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix=".json")
+    try:
+        with os.fdopen(fd, "w") as tmp_f:
+            json.dump(existing, tmp_f, indent=2)
+        os.replace(tmp_path, RESULTS_FILE)
+    except Exception:
+        # Clean up temp file on failure
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise
 
     return {"results": results, "total": len(results)}
 

@@ -17,6 +17,7 @@ export default function ChatPage() {
     const [input, setInput] = useState("");
     const [loading, setLoading] = useState(false);
     const [defenseOn, setDefenseOn] = useState(false);
+    const [modelName, setModelName] = useState("phi3:mini");
     const messagesEndRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
@@ -55,6 +56,9 @@ export default function ChatPage() {
 
             const data = await res.json();
 
+            // Update model name from server response
+            if (data.model) setModelName(data.model);
+
             const assistantMsg: Message = {
                 id: (Date.now() + 1).toString(),
                 role: "assistant",
@@ -70,7 +74,7 @@ export default function ChatPage() {
                 id: (Date.now() + 1).toString(),
                 role: "assistant",
                 content:
-                    "⚠️ Connection error. Make sure Ollama is running with phi3:mini loaded.\n\nRun: `ollama serve` and `ollama pull phi3:mini`",
+                    `⚠️ Connection error. Make sure Ollama is running with ${modelName} loaded.\n\nRun: \`ollama serve\` and \`ollama pull ${modelName}\``,
                 timestamp: new Date(),
                 defended: defenseOn,
             };
@@ -90,7 +94,7 @@ export default function ChatPage() {
                 <div className="chat-header">
                     <div className="chat-header-info">
                         <h2 style={{ fontSize: "1.1rem", fontWeight: 600 }}>AI Chat</h2>
-                        <span className="chat-model-badge">phi3:mini</span>
+                        <span className="chat-model-badge">{modelName}</span>
                     </div>
                     <div className="defense-toggle">
                         <label>Defense {defenseOn ? "ON" : "OFF"}</label>
@@ -117,7 +121,7 @@ export default function ChatPage() {
                         >
                             <div style={{ fontSize: "3rem", marginBottom: "1rem" }}>🤖</div>
                             <p style={{ fontSize: "1.1rem", marginBottom: "0.5rem" }}>
-                                Start a conversation with phi3:mini
+                                Start a conversation with {modelName}
                             </p>
                             <p style={{ fontSize: "0.85rem" }}>
                                 Toggle the defense switch to test input sanitization

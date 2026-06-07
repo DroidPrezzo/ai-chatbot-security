@@ -121,9 +121,11 @@ export default function ReportPage() {
         const handler = () => {
             const data = localStorage.getItem("attack-results");
             if (data) {
-                const parsed = JSON.parse(data);
-                setResults(parsed);
-                setMetrics(computeMetrics(parsed));
+                try {
+                    const parsed = JSON.parse(data);
+                    setResults(parsed);
+                    setMetrics(computeMetrics(parsed));
+                } catch { /* ignore malformed data */ }
             }
         };
         window.addEventListener("storage", handler);
