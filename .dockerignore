@@ -1,0 +1,17 @@
+node_modules
+.next
+.git
+.gitignore
+.env
+.env.local
+npm-debug.log
+*.tsbuildinfo
+screenshots
+attack-server/.venv
+attack-server/results
+attack-server/__pycache__
+**/__pycache__
+Dockerfile
+.dockerignore
+docker-compose.yml
+README.md

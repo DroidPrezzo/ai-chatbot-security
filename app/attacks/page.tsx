@@ -62,46 +62,33 @@ const ATTACK_SCENARIOS = [
     },
 ];
 
-// Simulated emoji converter (client-side approximation of PyRIT converters)
-function emojiEncode(text: string): string {
-    const map: Record<string, string> = {
-        a: "🅰️", b: "🅱️", c: "©️", d: "🇩", e: "📧", f: "🎏",
-        g: "🇬", h: "♓", i: "ℹ️", j: "🇯", k: "🇰", l: "🇱",
-        m: "Ⓜ️", n: "🇳", o: "🅾️", p: "🅿️", q: "🇶", r: "®️",
-        s: "💲", t: "✝️", u: "🇺", v: "🇻", w: "🇼", x: "❌",
-        y: "🇾", z: "🇿", " ": " ",
+// Shape of a single result returned by the PyRIT attack server (snake_case).
+interface ServerAttackResult {
+    id: string;
+    name: string;
+    category: string;
+    original_prompt: string;
+    converted_prompt: string;
+    response: string;
+    defended: boolean;
+    blocked: boolean;
+    threats: string[];
+    timestamp: string;
+}
+
+function mapServerResult(r: ServerAttackResult): AttackResult {
+    return {
+        id: r.id,
+        name: r.name,
+        category: r.category,
+        originalPrompt: r.original_prompt,
+        convertedPrompt: r.converted_prompt,
+        response: r.response,
+        defended: r.defended,
+        blocked: r.blocked,
+        threats: r.threats ?? [],
+        timestamp: r.timestamp,
     };
-    return text
-        .toLowerCase()
-        .split("")
-        .map((c) => map[c] || c)
-        .join("");
-}
-
-function addInvisibles(text: string): string {
-    return text.split("").join("\u200B\u200C");
-}
-
-function addVariationSelectors(text: string): string {
-    return text.split("").join("\uFE0F");
-}
-
-function convertPrompt(id: string, text: string): string {
-    switch (id) {
-        case "emoji_obfuscation":
-        case "mixed_emoji_prompt":
-            return emojiEncode(text);
-        case "ecoji_encoding":
-            return "🏜🔥🌺🎋🍜🌊🔴🎯🏔🌸🎵🍉🔷🌙🎪🍀🔶🌊"; // simulated ecoji output
-        case "variation_selector":
-            return addVariationSelectors(text);
-        case "invisible_injection":
-            return addInvisibles(text);
-        case "homoglyph_attack":
-            return text.replace(/a/g, "а").replace(/e/g, "е").replace(/o/g, "о"); // Cyrillic lookalikes
-        default:
-            return text;
-    }
 }
 
 export default function AttacksPage() {
@@ -109,6 +96,7 @@ export default function AttacksPage() {
     const [running, setRunning] = useState(false);
     const [progress, setProgress] = useState(0);
     const [currentAttack, setCurrentAttack] = useState("");
+    const [error, setError] = useState<string | null>(null);
 
     // Load persisted results on mount
     useEffect(() => {
@@ -123,67 +111,52 @@ export default function AttacksPage() {
         localStorage.setItem("attack-results", JSON.stringify(results));
     }, [results]);
 
+    // Run the full attack suite against the real PyRIT backend. The server
+    // performs the Unicode/emoji conversions and (optionally) the defense
+    // layer, so the converted payloads and block decisions are authoritative
+    // rather than client-side simulations.
     const runAttacks = async (withDefense: boolean) => {
         setRunning(true);
-        setProgress(0);
-        const newResults: AttackResult[] = [];
+        setError(null);
+        setProgress(10);
+        setCurrentAttack(
+            withDefense ? "Running defended suite…" : "Running undefended suite…"
+        );
 
-        for (let i = 0; i < ATTACK_SCENARIOS.length; i++) {
-            const scenario = ATTACK_SCENARIOS[i];
-            setCurrentAttack(scenario.name);
-            setProgress(((i) / ATTACK_SCENARIOS.length) * 100);
+        try {
+            const res = await fetch("/api/attacks/run-attacks", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ defense: withDefense }),
+            });
 
-            const converted = convertPrompt(scenario.id, scenario.prompt);
-
-            try {
-                const res = await fetch("/api/chat", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        message: converted,
-                        defense: withDefense,
-                        history: [],
-                    }),
-                });
-                const data = await res.json();
-
-                newResults.push({
-                    id: `${scenario.id}-${withDefense ? "def" : "undef"}-${Date.now()}`,
-                    name: scenario.name,
-                    category: scenario.category,
-                    originalPrompt: scenario.prompt,
-                    convertedPrompt: converted,
-                    response: data.response || "No response",
-                    defended: withDefense,
-                    blocked: (data.threats && data.threats.length > 0) || false,
-                    threats: data.threats || [],
-                    timestamp: new Date().toISOString(),
-                });
-            } catch {
-                newResults.push({
-                    id: `${scenario.id}-error-${Date.now()}`,
-                    name: scenario.name,
-                    category: scenario.category,
-                    originalPrompt: scenario.prompt,
-                    convertedPrompt: converted,
-                    response: "⚠️ Connection error — Ollama may not be running",
-                    defended: withDefense,
-                    blocked: false,
-                    threats: [],
-                    timestamp: new Date().toISOString(),
-                });
+            if (!res.ok) {
+                throw new Error(`Attack server returned ${res.status}`);
             }
-        }
 
-        setResults((prev) => [...prev, ...newResults]);
-        setProgress(100);
-        setCurrentAttack("");
-        setRunning(false);
+            const data = await res.json();
+            const mapped: AttackResult[] = (data.results ?? []).map(
+                mapServerResult
+            );
+            setResults((prev) => [...prev, ...mapped]);
+            setProgress(100);
+        } catch {
+            setError(
+                "Could not reach the PyRIT attack server. Start it with " +
+                "`uvicorn server:app --port 8000` (or `docker compose up`)."
+            );
+        } finally {
+            setCurrentAttack("");
+            setRunning(false);
+        }
     };
 
     const clearResults = () => {
         setResults([]);
+        setError(null);
         localStorage.removeItem("attack-results");
+        // Best-effort clear of server-side results too.
+        fetch("/api/attacks/results", { method: "DELETE" }).catch(() => {});
     };
 
     const blockedCount = results.filter((r) => r.blocked).length;
@@ -198,9 +171,24 @@ export default function AttacksPage() {
                 <div className="section-header">
                     <h1 className="section-title">⚡ Attack Laboratory</h1>
                     <p className="section-subtitle">
-                        Simulate PyRIT-powered emoji injection attacks against your chatbot
+                        Run real PyRIT-powered emoji &amp; Unicode injection attacks against your chatbot
                     </p>
                 </div>
+
+                {error && (
+                    <div
+                        className="card"
+                        role="alert"
+                        style={{
+                            marginBottom: "1.5rem",
+                            borderColor: "var(--danger)",
+                            color: "var(--danger)",
+                            fontSize: "0.9rem",
+                        }}
+                    >
+                        ⚠️ {error}
+                    </div>
+                )}
 
                 {/* Controls */}
                 <div

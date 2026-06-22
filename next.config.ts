@@ -4,6 +4,9 @@ const attackServerUrl =
     process.env.ATTACK_SERVER_URL || "http://localhost:8000";
 
 const nextConfig: NextConfig = {
+    // Emit a self-contained server bundle for a slim Docker image.
+    output: "standalone",
+
     async rewrites() {
         return [
             {

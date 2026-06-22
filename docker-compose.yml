@@ -1,0 +1,47 @@
+# YewoAI — AI Chatbot Security Platform
+# Brings up the Next.js frontend and the PyRIT attack server. Ollama is
+# expected to run on the host (or set OLLAMA_BASE_URL/OLLAMA_URL to a remote
+# instance). On Linux, host.docker.internal is mapped via extra_hosts below.
+
+services:
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      # Reach the attack server over the compose network.
+      ATTACK_SERVER_URL: http://attack-server:8000
+      # Point at your Ollama (or the Saffev proxy) on the host by default.
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-phi3:mini}
+      RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-30}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      attack-server:
+        condition: service_healthy
+    restart: unless-stopped
+
+  attack-server:
+    build:
+      context: ./attack-server
+      dockerfile: Dockerfile
+    # Not published to the host by default — the frontend reaches it over the
+    # internal network. Uncomment to expose it directly for debugging.
+    # ports:
+    #   - "8000:8000"
+    environment:
+      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-phi3:mini}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      RATE_LIMIT_MAX: ${ATTACK_RATE_LIMIT_MAX:-10}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - attack-results:/app/results
+    restart: unless-stopped
+
+volumes:
+  attack-results:

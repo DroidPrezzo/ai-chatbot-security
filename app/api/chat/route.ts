@@ -35,6 +35,47 @@ const MAX_HISTORY_ENTRY_LENGTH = 2000;
 const ALLOWED_ROLES = new Set(["user", "assistant"]);
 
 /** ============================================================
+ *  RATE LIMITING — per-IP fixed window (OWASP LLM10)
+ *  In-memory; suitable for a single self-hosted instance. For a
+ *  multi-replica deployment, back this with a shared store (Redis).
+ *  ============================================================ */
+
+const RATE_LIMIT_MAX = Number(process.env.RATE_LIMIT_MAX ?? 30); // requests
+const RATE_LIMIT_WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS ?? 60_000);
+
+const rateBuckets = new Map<string, { count: number; resetAt: number }>();
+
+function checkRateLimit(ip: string): { allowed: boolean; retryAfter: number } {
+    const now = Date.now();
+    const bucket = rateBuckets.get(ip);
+
+    if (!bucket || now >= bucket.resetAt) {
+        rateBuckets.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
+        return { allowed: true, retryAfter: 0 };
+    }
+
+    bucket.count += 1;
+    if (bucket.count > RATE_LIMIT_MAX) {
+        return { allowed: false, retryAfter: Math.ceil((bucket.resetAt - now) / 1000) };
+    }
+    return { allowed: true, retryAfter: 0 };
+}
+
+// Periodically evict expired buckets so the map cannot grow unbounded.
+function evictExpiredBuckets() {
+    const now = Date.now();
+    for (const [ip, bucket] of rateBuckets) {
+        if (now >= bucket.resetAt) rateBuckets.delete(ip);
+    }
+}
+
+function clientIp(req: NextRequest): string {
+    const fwd = req.headers.get("x-forwarded-for");
+    if (fwd) return fwd.split(",")[0].trim();
+    return req.headers.get("x-real-ip") ?? "unknown";
+}
+
+/** ============================================================
  *  DEFENSE LAYER — emoji + prompt injection sanitisation
  *  ============================================================ */
 
@@ -54,7 +95,27 @@ const VARIATION_SELECTORS_REPLACE = /[\u{FE00}-\u{FE0F}\u{E0100}-\u{E01EF}]/gu;
 const INVISIBLE_CHARS_TEST = /[\u200B\u200C\u200D\u2060\uFEFF\u00AD]/;
 const INVISIBLE_CHARS_REPLACE = /[\u200B\u200C\u200D\u2060\uFEFF\u00AD]/g;
 
-// Simple prompt injection pattern detection
+// Unicode tag characters (U+E0000\u2013E007F) used to smuggle payloads inside
+// a carrier emoji (e.g. PyRIT's variation-selector smuggler).
+const TAG_CHARS_TEST = /[\u{E0000}-\u{E007F}]/u;
+const TAG_CHARS_REPLACE = /[\u{E0000}-\u{E007F}]/gu;
+
+// Cross-script confusable homoglyphs \u2192 ASCII. NFKC does NOT fold these
+// (Cyrillic/Greek lookalikes are not compatibility-equivalent to Latin),
+// so they are handled explicitly. Kept in sync with attack-server/defense.py.
+const HOMOGLYPHS: Record<string, string> = {
+    "\u0430": "a", "\u0435": "e", "\u043E": "o", "\u0440": "p", "\u0441": "c", "\u0445": "x", "\u0443": "y",
+    "\u0456": "i", "\u0455": "s", "\u0458": "j", "\u0501": "d", "\u04BB": "h", "\u043A": "k", "\u043C": "m",
+    "\u0442": "t", "\u0432": "b", "\u043D": "h",
+    "\u03B1": "a", "\u03B5": "e", "\u03B9": "i", "\u03BF": "o", "\u03C1": "p", "\u03C5": "u", "\u03BD": "v",
+    "\u03C7": "x", "\u03B3": "y", "\u03C4": "t", "\u03BA": "k",
+    "\uA731": "s", "\u028B": "v", "\u1D83": "g",
+};
+const HOMOGLYPH_KEYS = Object.keys(HOMOGLYPHS).join("");
+const HOMOGLYPH_TEST = new RegExp(`[${HOMOGLYPH_KEYS}]`, "u");
+const HOMOGLYPH_REPLACE = new RegExp(`[${HOMOGLYPH_KEYS}]`, "gu");
+
+// Known prompt-injection templates. Kept in sync with attack-server/defense.py.
 const INJECTION_PATTERNS = [
     /ignore\s+(all\s+)?previous\s+(instructions|prompts)/i,
     /you\s+are\s+now\s+/i,
@@ -65,6 +126,8 @@ const INJECTION_PATTERNS = [
     /<<SYS>>/i,
     /jailbreak/i,
     /DAN\s+mode/i,
+    /no\s+(restrictions|safety\s+guidelines|filter)/i,
+    /reveal\s+your\s+(system\s+)?prompt/i,
 ];
 
 interface SanitizeResult {
@@ -77,10 +140,12 @@ function sanitizeInput(text: string): SanitizeResult {
     const threats: string[] = [];
     let sanitized = text;
 
-    // 1 — Strip variation selectors (data smuggling)
-    if (VARIATION_SELECTORS_TEST.test(sanitized)) {
+    // 1 — Strip variation selectors + tag characters (data smuggling)
+    if (VARIATION_SELECTORS_TEST.test(sanitized) || TAG_CHARS_TEST.test(sanitized)) {
         threats.push("variation_selector_smuggling");
-        sanitized = sanitized.replace(VARIATION_SELECTORS_REPLACE, "");
+        sanitized = sanitized
+            .replace(VARIATION_SELECTORS_REPLACE, "")
+            .replace(TAG_CHARS_REPLACE, "");
     }
 
     // 2 — Strip invisible / zero-width characters
@@ -95,10 +160,17 @@ function sanitizeInput(text: string): SanitizeResult {
         sanitized = sanitized.replace(EMOJI_PATTERN_REPLACE, "");
     }
 
-    // 4 — Unicode NFKC normalisation (confusable homoglyphs → ASCII)
+    // 4 — Unicode NFKC normalisation (folds math-alphanumeric / compatibility
+    //     homoglyphs to ASCII; cross-script lookalikes handled in step 5)
     sanitized = sanitized.normalize("NFKC");
 
-    // 5 — Prompt injection pattern matching
+    // 5 — Cross-script confusable homoglyph folding (NFKC misses these)
+    if (HOMOGLYPH_TEST.test(sanitized)) {
+        threats.push("homoglyph_substitution");
+        sanitized = sanitized.replace(HOMOGLYPH_REPLACE, (ch) => HOMOGLYPHS[ch] ?? ch);
+    }
+
+    // 6 — Prompt injection pattern matching
     for (const pattern of INJECTION_PATTERNS) {
         if (pattern.test(sanitized)) {
             threats.push("prompt_injection_pattern");
@@ -157,6 +229,20 @@ function sanitizeErrorMessage(rawError: string): string {
 
 export async function POST(req: NextRequest) {
     try {
+        // ── Rate limiting ───────────────────────────────────
+        const ip = clientIp(req);
+        const { allowed, retryAfter } = checkRateLimit(ip);
+        if (Math.random() < 0.01) evictExpiredBuckets(); // amortised cleanup
+        if (!allowed) {
+            return NextResponse.json(
+                {
+                    response: `Rate limit exceeded. Try again in ${retryAfter}s.`,
+                    model: OLLAMA_MODEL,
+                },
+                { status: 429, headers: { "Retry-After": String(retryAfter) } }
+            );
+        }
+
         const body = await req.json();
         const { message, defense, history } = body;
 
