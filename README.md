@@ -72,6 +72,17 @@ The frontend reaches it via the `/api/attacks/*` proxy configured in `next.confi
 `curl http://localhost:8000/health` — `pyrit_available: true` confirms the real
 converters are active.
 
+**API** — attack runs are asynchronous so long (real LLM) runs never hit a proxy
+timeout:
+
+- `POST /run-attacks` `{ "defense": bool }` → `202 { job_id, status, total }`
+- `GET /jobs/{job_id}` → `{ status, progress: { completed, total }, results? }`
+  (`results` present once `status` is `completed`)
+- `GET /results` / `DELETE /results` — persisted history
+- `GET /health` — liveness + available PyRIT converters
+
+The Attack Lab polls `/jobs/{id}` and shows live progress.
+
 ## Project Structure
 
 ```

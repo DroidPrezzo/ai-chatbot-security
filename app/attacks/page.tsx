@@ -115,35 +115,69 @@ export default function AttacksPage() {
     // performs the Unicode/emoji conversions and (optionally) the defense
     // layer, so the converted payloads and block decisions are authoritative
     // rather than client-side simulations.
+    //
+    // /run-attacks starts a background job and returns immediately; we then
+    // poll /jobs/{id} for progress so long (real LLM) runs never time out.
     const runAttacks = async (withDefense: boolean) => {
         setRunning(true);
         setError(null);
-        setProgress(10);
+        setProgress(0);
         setCurrentAttack(
             withDefense ? "Running defended suite…" : "Running undefended suite…"
         );
 
+        const POLL_INTERVAL_MS = 1500;
+        const MAX_POLLS = 240; // ~6 min ceiling
+
         try {
-            const res = await fetch("/api/attacks/run-attacks", {
+            const startRes = await fetch("/api/attacks/run-attacks", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ defense: withDefense }),
             });
-
-            if (!res.ok) {
-                throw new Error(`Attack server returned ${res.status}`);
+            if (startRes.status === 429) {
+                throw new Error("Rate limited — wait a moment before running again.");
             }
+            if (!startRes.ok) {
+                throw new Error(`Attack server returned ${startRes.status}`);
+            }
+            const { job_id: jobId } = await startRes.json();
+            if (!jobId) throw new Error("Attack server did not return a job id.");
 
-            const data = await res.json();
-            const mapped: AttackResult[] = (data.results ?? []).map(
-                mapServerResult
-            );
-            setResults((prev) => [...prev, ...mapped]);
-            setProgress(100);
-        } catch {
+            for (let i = 0; i < MAX_POLLS; i++) {
+                await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+
+                const pollRes = await fetch(`/api/attacks/jobs/${jobId}`);
+                if (!pollRes.ok) {
+                    throw new Error(`Lost track of the job (${pollRes.status}).`);
+                }
+                const job = await pollRes.json();
+
+                const { completed, total } = job.progress ?? { completed: 0, total: 6 };
+                setProgress(total ? Math.round((completed / total) * 100) : 0);
+                setCurrentAttack(
+                    `${withDefense ? "Defended" : "Undefended"} run — ${completed}/${total} scenarios`
+                );
+
+                if (job.status === "completed") {
+                    const mapped: AttackResult[] = (job.results ?? []).map(
+                        mapServerResult
+                    );
+                    setResults((prev) => [...prev, ...mapped]);
+                    setProgress(100);
+                    return;
+                }
+                if (job.status === "failed") {
+                    throw new Error(job.error || "Attack job failed on the server.");
+                }
+            }
+            throw new Error("Attack run timed out while polling for results.");
+        } catch (e) {
             setError(
-                "Could not reach the PyRIT attack server. Start it with " +
-                "`uvicorn server:app --port 8000` (or `docker compose up`)."
+                e instanceof Error && e.message
+                    ? e.message
+                    : "Could not reach the PyRIT attack server. Start it with " +
+                      "`uvicorn server:app --port 8000` (or `docker compose up`)."
             );
         } finally {
             setCurrentAttack("");

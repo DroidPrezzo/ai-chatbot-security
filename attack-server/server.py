@@ -17,6 +17,7 @@ import logging
 import os
 import tempfile
 import time
+import uuid
 from datetime import datetime, timezone
 
 import httpx
@@ -118,10 +119,21 @@ async def rate_limit_middleware(request: Request, call_next):
 MAX_STORED_RESULTS = 500
 # Cap how many characters of a model response we persist/return.
 MAX_RESPONSE_CHARS = 4000
-OLLAMA_TIMEOUT_SECONDS = 60
+OLLAMA_TIMEOUT_SECONDS = int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "60"))
+# Ask Ollama to keep the model resident in VRAM between calls (avoids paying
+# the model-load cost on every request). "-1" keeps it loaded indefinitely.
+OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "30m")
 # How many scenarios may hit the model at once (keeps a small local model from
 # being swamped while still avoiding slow sequential execution).
 MAX_CONCURRENT_SCENARIOS = int(os.getenv("MAX_CONCURRENT_SCENARIOS", "3"))
+
+# ─── Async job store ─────────────────────────────────────────────
+# /run-attacks starts a background job and returns immediately; clients poll
+# /jobs/{id}. This keeps long (real LLM) runs off the request path so they
+# never hit an upstream proxy timeout.
+JOB_TTL_SECONDS = int(os.getenv("JOB_TTL_SECONDS", "3600"))
+MAX_JOBS = 100
+JOBS: dict[str, dict] = {}
 
 
 # ─── Models ──────────────────────────────────────────────────────
@@ -232,6 +244,7 @@ async def query_ollama(prompt: str) -> str:
                         {"role": "user", "content": prompt},
                     ],
                     "stream": False,
+                    "keep_alive": OLLAMA_KEEP_ALIVE,
                 },
             )
             res.raise_for_status()
@@ -284,65 +297,141 @@ async def health():
     }
 
 
-@app.post("/run-attacks")
-async def run_attacks(req: AttackRequest):
-    """Run all attack scenarios and return structured results.
+async def _run_scenario(scenario: dict, defense: bool, semaphore: asyncio.Semaphore) -> dict:
+    """Convert one scenario, optionally defend it, and capture the result.
 
-    When `defense` is true, the converted payload is passed through the shared
+    When `defense` is true the converted payload is passed through the shared
     defense layer. The attack is reported as *blocked* only when the defense
     actually stops the raw payload from reaching the model — i.e. it is either
     neutralized to nothing or matches a known injection template.
     """
-    # Run scenarios concurrently (bounded) — they are independent, and the
-    # alternative of 6 sequential LLM calls easily exceeds upstream proxy
-    # timeouts on the undefended run.
+    async with semaphore:
+        converted = await convert(scenario["prompt"], scenario["converter"])
+
+        threats: list[str] = []
+        blocked = False
+
+        if defense:
+            outcome = sanitize(converted)
+            threats = outcome.threats
+            if outcome.blocked:
+                blocked = True
+                response = "[blocked by defense layer — payload not sent to model]"
+            else:
+                response = await query_ollama(outcome.sanitized)
+        else:
+            response = await query_ollama(converted)
+
+        return {
+            "id": f"{scenario['id']}-{'def' if defense else 'undef'}-{int(time.time()*1000)}",
+            "name": scenario["name"],
+            "category": scenario["category"],
+            "original_prompt": scenario["prompt"],
+            "converted_prompt": converted[:MAX_RESPONSE_CHARS],
+            "response": response,
+            "defended": defense,
+            "blocked": blocked,
+            "threats": threats,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+
+async def _execute_job(job_id: str, defense: bool) -> None:
+    """Background worker: run all scenarios concurrently, tracking progress."""
+    job = JOBS[job_id]
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_SCENARIOS)
 
-    async def run_one(scenario: dict) -> dict:
-        async with semaphore:
-            converted = await convert(scenario["prompt"], scenario["converter"])
-
-            threats: list[str] = []
-            blocked = False
-
-            if req.defense:
-                outcome = sanitize(converted)
-                threats = outcome.threats
-                if outcome.blocked:
-                    # Defense refused to forward the payload to the model.
-                    blocked = True
-                    response = "[blocked by defense layer — payload not sent to model]"
-                else:
-                    # Obfuscation stripped; forward the cleaned text instead.
-                    response = await query_ollama(outcome.sanitized)
-            else:
-                response = await query_ollama(converted)
-
-            return {
-                "id": f"{scenario['id']}-{'def' if req.defense else 'undef'}-{int(time.time()*1000)}",
+    async def run_and_track(scenario: dict, index: int) -> None:
+        try:
+            result = await _run_scenario(scenario, defense, semaphore)
+        except Exception as exc:  # never let one scenario kill the whole job
+            logger.exception("Scenario %s failed", scenario["id"])
+            result = {
+                "id": f"{scenario['id']}-error-{int(time.time()*1000)}",
                 "name": scenario["name"],
                 "category": scenario["category"],
                 "original_prompt": scenario["prompt"],
-                "converted_prompt": converted[:MAX_RESPONSE_CHARS],
-                "response": response,
-                "defended": req.defense,
-                "blocked": blocked,
-                "threats": threats,
+                "converted_prompt": "",
+                "response": f"Scenario failed: {exc}",
+                "defended": defense,
+                "blocked": False,
+                "threats": [],
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
-
-    # gather preserves input order, so results stay aligned with SCENARIOS.
-    results: list[dict] = await asyncio.gather(*(run_one(s) for s in SCENARIOS))
+        job["results"][index] = result
+        job["completed"] += 1
 
     try:
-        existing = _load_results()
-        existing.extend(results)
-        _save_results(existing)
-    except OSError as exc:
-        logger.error("Failed to persist results: %s", exc)
-        raise HTTPException(status_code=500, detail="Failed to persist results")
+        await asyncio.gather(
+            *(run_and_track(s, i) for i, s in enumerate(SCENARIOS))
+        )
+        try:
+            existing = _load_results()
+            existing.extend(job["results"])
+            _save_results(existing)
+        except OSError as exc:
+            logger.error("Failed to persist results: %s", exc)
+        job["status"] = "completed"
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.exception("Job %s failed", job_id)
+        job["status"] = "failed"
+        job["error"] = str(exc)
 
-    return {"results": results, "total": len(results)}
+
+def _evict_stale_jobs() -> None:
+    """Drop finished jobs past their TTL, and hard-cap the store size."""
+    now = time.monotonic()
+    for jid in [j for j, v in JOBS.items()
+                if v["status"] != "running" and now - v["created_at"] > JOB_TTL_SECONDS]:
+        JOBS.pop(jid, None)
+    while len(JOBS) > MAX_JOBS:
+        # Remove the oldest finished job; never evict a running one.
+        finished = [(v["created_at"], j) for j, v in JOBS.items() if v["status"] != "running"]
+        if not finished:
+            break
+        JOBS.pop(min(finished)[1], None)
+
+
+@app.post("/run-attacks", status_code=202)
+async def run_attacks(req: AttackRequest):
+    """Start an attack run as a background job and return its id.
+
+    The client polls `GET /jobs/{job_id}` for progress and results. This keeps
+    long (real LLM) runs off the request path so they never hit a proxy timeout.
+    """
+    _evict_stale_jobs()
+    job_id = uuid.uuid4().hex
+    JOBS[job_id] = {
+        "id": job_id,
+        "status": "running",
+        "defended": req.defense,
+        "total": len(SCENARIOS),
+        "completed": 0,
+        "results": [None] * len(SCENARIOS),
+        "error": None,
+        "created_at": time.monotonic(),
+    }
+    # Keep a reference to the task so it isn't garbage-collected mid-flight.
+    JOBS[job_id]["task"] = asyncio.create_task(_execute_job(job_id, req.defense))
+    return {"job_id": job_id, "status": "running", "total": len(SCENARIOS)}
+
+
+@app.get("/jobs/{job_id}")
+async def get_job(job_id: str):
+    """Return job status, progress, and (when finished) results."""
+    job = JOBS.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Unknown or expired job id")
+    body = {
+        "job_id": job["id"],
+        "status": job["status"],
+        "defended": job["defended"],
+        "progress": {"completed": job["completed"], "total": job["total"]},
+        "error": job["error"],
+    }
+    if job["status"] == "completed":
+        body["results"] = [r for r in job["results"] if r is not None]
+    return body
 
 
 @app.get("/results")
