@@ -119,6 +119,9 @@ MAX_STORED_RESULTS = 500
 # Cap how many characters of a model response we persist/return.
 MAX_RESPONSE_CHARS = 4000
 OLLAMA_TIMEOUT_SECONDS = 60
+# How many scenarios may hit the model at once (keeps a small local model from
+# being swamped while still avoiding slow sequential execution).
+MAX_CONCURRENT_SCENARIOS = int(os.getenv("MAX_CONCURRENT_SCENARIOS", "3"))
 
 
 # ─── Models ──────────────────────────────────────────────────────
@@ -290,39 +293,46 @@ async def run_attacks(req: AttackRequest):
     actually stops the raw payload from reaching the model — i.e. it is either
     neutralized to nothing or matches a known injection template.
     """
-    results: list[dict] = []
+    # Run scenarios concurrently (bounded) — they are independent, and the
+    # alternative of 6 sequential LLM calls easily exceeds upstream proxy
+    # timeouts on the undefended run.
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_SCENARIOS)
 
-    for scenario in SCENARIOS:
-        converted = await convert(scenario["prompt"], scenario["converter"])
+    async def run_one(scenario: dict) -> dict:
+        async with semaphore:
+            converted = await convert(scenario["prompt"], scenario["converter"])
 
-        threats: list[str] = []
-        blocked = False
+            threats: list[str] = []
+            blocked = False
 
-        if req.defense:
-            outcome = sanitize(converted)
-            threats = outcome.threats
-            if outcome.blocked:
-                # Defense refused to forward the payload to the model.
-                blocked = True
-                response = "[blocked by defense layer — payload not sent to model]"
+            if req.defense:
+                outcome = sanitize(converted)
+                threats = outcome.threats
+                if outcome.blocked:
+                    # Defense refused to forward the payload to the model.
+                    blocked = True
+                    response = "[blocked by defense layer — payload not sent to model]"
+                else:
+                    # Obfuscation stripped; forward the cleaned text instead.
+                    response = await query_ollama(outcome.sanitized)
             else:
-                # Obfuscation stripped; forward the cleaned text instead.
-                response = await query_ollama(outcome.sanitized)
-        else:
-            response = await query_ollama(converted)
+                response = await query_ollama(converted)
 
-        results.append({
-            "id": f"{scenario['id']}-{'def' if req.defense else 'undef'}-{int(time.time()*1000)}",
-            "name": scenario["name"],
-            "category": scenario["category"],
-            "original_prompt": scenario["prompt"],
-            "converted_prompt": converted[:MAX_RESPONSE_CHARS],
-            "response": response,
-            "defended": req.defense,
-            "blocked": blocked,
-            "threats": threats,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        })
+            return {
+                "id": f"{scenario['id']}-{'def' if req.defense else 'undef'}-{int(time.time()*1000)}",
+                "name": scenario["name"],
+                "category": scenario["category"],
+                "original_prompt": scenario["prompt"],
+                "converted_prompt": converted[:MAX_RESPONSE_CHARS],
+                "response": response,
+                "defended": req.defense,
+                "blocked": blocked,
+                "threats": threats,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+
+    # gather preserves input order, so results stay aligned with SCENARIOS.
+    results: list[dict] = await asyncio.gather(*(run_one(s) for s in SCENARIOS))
 
     try:
         existing = _load_results()
