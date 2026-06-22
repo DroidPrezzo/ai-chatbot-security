@@ -15,6 +15,10 @@ interface AttackResult {
     blocked: boolean;
     threats: string[];
     timestamp: string;
+    // Session metadata: every result is tagged with the run that produced it so
+    // the report can group results by session instead of aggregating them.
+    runId: string;
+    runAt: string;
 }
 
 const ATTACK_SCENARIOS = [
@@ -76,7 +80,11 @@ interface ServerAttackResult {
     timestamp: string;
 }
 
-function mapServerResult(r: ServerAttackResult): AttackResult {
+// Session metadata (runId/runAt) is attached by the caller, so this maps
+// everything else from the server's snake_case payload.
+function mapServerResult(
+    r: ServerAttackResult
+): Omit<AttackResult, "runId" | "runAt"> {
     return {
         id: r.id,
         name: r.name,
@@ -97,6 +105,16 @@ export default function AttacksPage() {
     const [progress, setProgress] = useState(0);
     const [currentAttack, setCurrentAttack] = useState("");
     const [error, setError] = useState<string | null>(null);
+    // Rows whose full model response is expanded (otherwise a short preview).
+    const [expanded, setExpanded] = useState<Set<string>>(new Set());
+
+    const toggleExpanded = (id: string) =>
+        setExpanded((prev) => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id);
+            else next.add(id);
+            return next;
+        });
 
     // Load persisted results on mount
     useEffect(() => {
@@ -160,8 +178,16 @@ export default function AttacksPage() {
                 );
 
                 if (job.status === "completed") {
+                    // Tag this batch as one session so results from separate runs
+                    // stay grouped (and never aggregated) in the report.
+                    const runId = `${withDefense ? "def" : "undef"}-${jobId}`;
+                    const runAt = new Date().toISOString();
                     const mapped: AttackResult[] = (job.results ?? []).map(
-                        mapServerResult
+                        (r: ServerAttackResult) => ({
+                            ...mapServerResult(r),
+                            runId,
+                            runAt,
+                        })
                     );
                     setResults((prev) => [...prev, ...mapped]);
                     setProgress(100);
@@ -335,7 +361,7 @@ export default function AttacksPage() {
                                             <th>Mode</th>
                                             <th>Status</th>
                                             <th>Threats Detected</th>
-                                            <th>Response Preview</th>
+                                            <th>Model Response</th>
                                         </tr>
                                     </thead>
                                     <tbody>
@@ -369,15 +395,50 @@ export default function AttacksPage() {
                                                 </td>
                                                 <td
                                                     style={{
-                                                        maxWidth: "250px",
-                                                        overflow: "hidden",
-                                                        textOverflow: "ellipsis",
-                                                        whiteSpace: "nowrap",
+                                                        maxWidth: "320px",
                                                         fontSize: "0.8rem",
                                                         color: "var(--text-secondary)",
                                                     }}
                                                 >
-                                                    {r.response.substring(0, 100)}
+                                                    <div
+                                                        style={
+                                                            expanded.has(r.id)
+                                                                ? {
+                                                                      whiteSpace: "pre-wrap",
+                                                                      wordBreak: "break-word",
+                                                                  }
+                                                                : {
+                                                                      overflow: "hidden",
+                                                                      textOverflow: "ellipsis",
+                                                                      whiteSpace: "nowrap",
+                                                                      maxWidth: "320px",
+                                                                  }
+                                                        }
+                                                    >
+                                                        {expanded.has(r.id)
+                                                            ? r.response
+                                                            : r.response.substring(0, 100)}
+                                                    </div>
+                                                    {r.response.length > 100 && (
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => toggleExpanded(r.id)}
+                                                            style={{
+                                                                marginTop: "0.35rem",
+                                                                background: "none",
+                                                                border: "none",
+                                                                padding: 0,
+                                                                cursor: "pointer",
+                                                                color: "var(--accent, #6366f1)",
+                                                                fontSize: "0.78rem",
+                                                                fontWeight: 500,
+                                                            }}
+                                                        >
+                                                            {expanded.has(r.id)
+                                                                ? "Show less"
+                                                                : "Show full response"}
+                                                        </button>
+                                                    )}
                                                 </td>
                                             </tr>
                                         ))}

@@ -2,7 +2,6 @@
 
 import { useState, useEffect } from "react";
 import Nav from "@/components/Nav";
-import ReportCharts from "@/components/ReportCharts";
 
 interface AttackResult {
     id: string;
@@ -12,35 +11,50 @@ interface AttackResult {
     blocked: boolean;
     threats: string[];
     response: string;
+    // Session metadata (added by the attack lab). Older results may lack these.
+    runId?: string;
+    runAt?: string;
 }
 
-interface RiskMetrics {
-    overallScore: number;
+interface SessionMetrics {
+    runId: string;
+    runAt: string;
+    defended: boolean;
+    score: number;
     riskLevel: "critical" | "high" | "medium" | "low";
-    totalAttacks: number;
+    total: number;
     blocked: number;
     passed: number;
     blockRate: number;
-    defendedBlockRate: number;
-    undefendedBlockRate: number;
     categories: { name: string; attacks: number; blocked: number }[];
-    recommendations: string[];
 }
 
-function computeMetrics(results: AttackResult[]): RiskMetrics {
-    const defended = results.filter((r) => r.defended);
-    const undefended = results.filter((r) => !r.defended);
+// One "session" is a single run of the suite (one click of Run With/Without
+// Defense). Results are grouped by their runId so separate runs stay separate
+// instead of being aggregated into a single blended score.
+function groupBySession(results: AttackResult[]) {
+    const groups = new Map<string, AttackResult[]>();
+    for (const r of results) {
+        const key = r.runId ?? `legacy-${r.defended ? "def" : "undef"}`;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key)!.push(r);
+    }
+    return [...groups.entries()]
+        .map(([runId, rs]) => computeSessionMetrics(runId, rs))
+        // Newest session first.
+        .sort((a, b) => (a.runAt < b.runAt ? 1 : -1));
+}
+
+function computeSessionMetrics(
+    runId: string,
+    results: AttackResult[]
+): SessionMetrics {
     const blocked = results.filter((r) => r.blocked).length;
-    const passed = results.filter((r) => !r.blocked).length;
+    const passed = results.length - blocked;
     const blockRate = results.length > 0 ? blocked / results.length : 0;
-    const defendedBlockRate =
-        defended.length > 0
-            ? defended.filter((r) => r.blocked).length / defended.length
-            : 0;
-    const undefendedBlockRate =
-        undefended.length > 0
-            ? undefended.filter((r) => r.blocked).length / undefended.length
-            : 0;
+    const score = Math.round(blockRate * 100);
+    const riskLevel: SessionMetrics["riskLevel"] =
+        score >= 80 ? "low" : score >= 60 ? "medium" : score >= 40 ? "high" : "critical";
 
     const cats = [...new Set(results.map((r) => r.category))];
     const categories = cats.map((cat) => ({
@@ -49,50 +63,17 @@ function computeMetrics(results: AttackResult[]): RiskMetrics {
         blocked: results.filter((r) => r.category === cat && r.blocked).length,
     }));
 
-    // Risk score: 100 = perfectly defended, 0 = completely vulnerable
-    const overallScore = Math.round(blockRate * 100);
-    const riskLevel: RiskMetrics["riskLevel"] =
-        overallScore >= 80 ? "low" : overallScore >= 60 ? "medium" : overallScore >= 40 ? "high" : "critical";
-
-    const recommendations: string[] = [];
-    if (undefendedBlockRate < 0.3)
-        recommendations.push(
-            "Your undefended chatbot is highly vulnerable. Always enable the defense layer in production."
-        );
-    if (defendedBlockRate < 1)
-        recommendations.push(
-            "Some attacks bypassed the defense layer. Consider adding additional sanitization rules."
-        );
-    const emojiCat = categories.find((c) => c.name === "Emoji Injection");
-    if (emojiCat && emojiCat.blocked < emojiCat.attacks)
-        recommendations.push(
-            "Emoji injection attacks are partially successful. Strengthen emoji stripping and encoding detection."
-        );
-    const unicodeCat = categories.find((c) => c.name === "Unicode Smuggling");
-    if (unicodeCat && unicodeCat.blocked < unicodeCat.attacks)
-        recommendations.push(
-            "Unicode smuggling attacks bypassed defenses. Add stricter zero-width character filtering."
-        );
-    if (overallScore >= 80)
-        recommendations.push(
-            "Defense layer is performing well. Continue monitoring for new attack vectors."
-        );
-    if (results.length < 12)
-        recommendations.push(
-            "Run attacks in both defended and undefended modes for a complete comparison."
-        );
-
     return {
-        overallScore,
+        runId,
+        runAt: results[0]?.runAt ?? "",
+        defended: results[0]?.defended ?? false,
+        score,
         riskLevel,
-        totalAttacks: results.length,
+        total: results.length,
         blocked,
         passed,
         blockRate,
-        defendedBlockRate,
-        undefendedBlockRate,
         categories,
-        recommendations,
     };
 }
 
@@ -103,33 +84,167 @@ const RISK_COLORS = {
     low: "var(--success)",
 };
 
+function formatRunAt(runAt: string): string {
+    if (!runAt) return "Earlier run";
+    const d = new Date(runAt);
+    return isNaN(d.getTime()) ? "Earlier run" : d.toLocaleString();
+}
+
+function SessionCard({ s }: { s: SessionMetrics }) {
+    return (
+        <div className="card" style={{ marginBottom: "2rem" }}>
+            {/* Session header */}
+            <div
+                style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                    flexWrap: "wrap",
+                    gap: "1rem",
+                    marginBottom: "1.5rem",
+                }}
+            >
+                <div>
+                    <span
+                        className={`badge ${s.defended ? "badge-success" : "badge-danger"}`}
+                        style={{ fontSize: "0.85rem" }}
+                    >
+                        {s.defended ? "🛡️ Defended Run" : "🔓 Undefended Run"}
+                    </span>
+                    <div
+                        style={{
+                            fontSize: "0.8rem",
+                            color: "var(--text-secondary)",
+                            marginTop: "0.4rem",
+                        }}
+                    >
+                        {formatRunAt(s.runAt)} · {s.total} scenarios
+                    </div>
+                </div>
+                <div style={{ textAlign: "right" }}>
+                    <div
+                        style={{
+                            fontSize: "2rem",
+                            fontWeight: 700,
+                            color: RISK_COLORS[s.riskLevel],
+                            lineHeight: 1,
+                        }}
+                    >
+                        {s.score}
+                    </div>
+                    <div
+                        style={{
+                            fontSize: "0.7rem",
+                            color: "var(--text-secondary)",
+                            textTransform: "uppercase",
+                            letterSpacing: "0.05em",
+                        }}
+                    >
+                        {s.riskLevel} risk
+                    </div>
+                </div>
+            </div>
+
+            {/* Summary stats */}
+            <div className="stats-grid" style={{ marginBottom: "1.5rem" }}>
+                <div className="stat-card">
+                    <div className="stat-label">Scenarios</div>
+                    <div className="stat-value">{s.total}</div>
+                </div>
+                <div className="stat-card">
+                    <div className="stat-label">Blocked</div>
+                    <div className="stat-value success">{s.blocked}</div>
+                </div>
+                <div className="stat-card">
+                    <div className="stat-label">Passed</div>
+                    <div className="stat-value danger">{s.passed}</div>
+                </div>
+                <div className="stat-card">
+                    <div className="stat-label">Block Rate</div>
+                    <div
+                        className={`stat-value ${s.blockRate > 0.7 ? "success" : "danger"}`}
+                    >
+                        {Math.round(s.blockRate * 100)}%
+                    </div>
+                </div>
+            </div>
+
+            {/* Category breakdown */}
+            <div className="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Category</th>
+                            <th>Attacks</th>
+                            <th>Blocked</th>
+                            <th>Passed</th>
+                            <th>Block Rate</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {s.categories.map((cat) => (
+                            <tr key={cat.name}>
+                                <td style={{ fontWeight: 500 }}>{cat.name}</td>
+                                <td>{cat.attacks}</td>
+                                <td style={{ color: "var(--success)" }}>{cat.blocked}</td>
+                                <td style={{ color: "var(--danger)" }}>
+                                    {cat.attacks - cat.blocked}
+                                </td>
+                                <td>
+                                    <div
+                                        style={{
+                                            display: "flex",
+                                            alignItems: "center",
+                                            gap: "0.75rem",
+                                        }}
+                                    >
+                                        <div
+                                            className="progress-bar"
+                                            style={{ width: "80px" }}
+                                        >
+                                            <div
+                                                className={`progress-fill ${cat.blocked / cat.attacks > 0.7 ? "success" : "danger"}`}
+                                                style={{
+                                                    width: `${(cat.blocked / cat.attacks) * 100}%`,
+                                                }}
+                                            />
+                                        </div>
+                                        <span style={{ fontSize: "0.85rem" }}>
+                                            {Math.round((cat.blocked / cat.attacks) * 100)}%
+                                        </span>
+                                    </div>
+                                </td>
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    );
+}
+
 export default function ReportPage() {
-    const [results, setResults] = useState<AttackResult[]>([]);
-    const [metrics, setMetrics] = useState<RiskMetrics | null>(null);
+    const [sessions, setSessions] = useState<SessionMetrics[]>([]);
 
-    // Load results from localStorage (shared with attack page)
+    // Load results from localStorage (shared with attack page) and group them
+    // into sessions. Re-runs the grouping whenever storage changes.
     useEffect(() => {
-        const stored = localStorage.getItem("attack-results");
-        if (stored) {
+        const load = () => {
+            const stored = localStorage.getItem("attack-results");
+            if (!stored) {
+                setSessions([]);
+                return;
+            }
             try {
-                const parsed = JSON.parse(stored);
-                setResults(parsed);
-                setMetrics(computeMetrics(parsed));
-            } catch { /* ignore */ }
-        }
-
-        const handler = () => {
-            const data = localStorage.getItem("attack-results");
-            if (data) {
-                try {
-                    const parsed = JSON.parse(data);
-                    setResults(parsed);
-                    setMetrics(computeMetrics(parsed));
-                } catch { /* ignore malformed data */ }
+                const parsed: AttackResult[] = JSON.parse(stored);
+                setSessions(groupBySession(parsed));
+            } catch {
+                /* ignore malformed data */
             }
         };
-        window.addEventListener("storage", handler);
-        return () => window.removeEventListener("storage", handler);
+        load();
+        window.addEventListener("storage", load);
+        return () => window.removeEventListener("storage", load);
     }, []);
 
     return (
@@ -139,12 +254,12 @@ export default function ReportPage() {
                 <div className="section-header">
                     <h1 className="section-title">📊 Risk Report</h1>
                     <p className="section-subtitle">
-                        Security assessment based on emoji injection attack simulation
-                        results
+                        Security assessment grouped by run — each session is scored
+                        separately so defended and undefended runs stay distinct
                     </p>
                 </div>
 
-                {!metrics || results.length === 0 ? (
+                {sessions.length === 0 ? (
                     <div
                         className="card"
                         style={{ textAlign: "center", padding: "4rem 2rem" }}
@@ -173,244 +288,19 @@ export default function ReportPage() {
                     </div>
                 ) : (
                     <>
-                        {/* Risk Score */}
-                        <div className="card" style={{ textAlign: "center", marginBottom: "2rem" }}>
-                            <div className="risk-score-circle">
-                                <span
-                                    className="risk-score-value"
-                                    style={{ color: RISK_COLORS[metrics.riskLevel] }}
-                                >
-                                    {metrics.overallScore}
-                                </span>
-                                <span className="risk-score-label">Security Score</span>
-                            </div>
-                            <span
-                                className="badge"
-                                style={{
-                                    background: `${RISK_COLORS[metrics.riskLevel]}20`,
-                                    color: RISK_COLORS[metrics.riskLevel],
-                                    fontSize: "0.85rem",
-                                    padding: "0.375rem 1rem",
-                                }}
-                            >
-                                {metrics.riskLevel.toUpperCase()} RISK
-                            </span>
-                        </div>
-
-                        {/* Summary Stats */}
-                        <div className="stats-grid">
-                            <div className="stat-card">
-                                <div className="stat-label">Total Attacks Run</div>
-                                <div className="stat-value">{metrics.totalAttacks}</div>
-                            </div>
-                            <div className="stat-card">
-                                <div className="stat-label">Attacks Blocked</div>
-                                <div className="stat-value success">{metrics.blocked}</div>
-                            </div>
-                            <div className="stat-card">
-                                <div className="stat-label">Attacks Passed</div>
-                                <div className="stat-value danger">{metrics.passed}</div>
-                            </div>
-                            <div className="stat-card">
-                                <div className="stat-label">Overall Block Rate</div>
-                                <div
-                                    className={`stat-value ${metrics.blockRate > 0.7 ? "success" : "danger"}`}
-                                >
-                                    {Math.round(metrics.blockRate * 100)}%
-                                </div>
-                            </div>
-                        </div>
-
-                        {/* Defense Comparison */}
-                        <div
-                            className="grid-2"
-                            style={{ marginBottom: "2rem" }}
+                        <p
+                            style={{
+                                fontSize: "0.85rem",
+                                color: "var(--text-secondary)",
+                                marginBottom: "1.5rem",
+                            }}
                         >
-                            <div className="card">
-                                <h3
-                                    style={{
-                                        fontSize: "0.95rem",
-                                        fontWeight: 600,
-                                        marginBottom: "1rem",
-                                    }}
-                                >
-                                    🔓 Undefended Mode
-                                </h3>
-                                <div
-                                    style={{
-                                        fontSize: "2.5rem",
-                                        fontWeight: 700,
-                                        color: "var(--danger)",
-                                        marginBottom: "0.5rem",
-                                    }}
-                                >
-                                    {Math.round(metrics.undefendedBlockRate * 100)}%
-                                </div>
-                                <div
-                                    style={{
-                                        fontSize: "0.85rem",
-                                        color: "var(--text-secondary)",
-                                        marginBottom: "1rem",
-                                    }}
-                                >
-                                    Block Rate
-                                </div>
-                                <div className="progress-bar">
-                                    <div
-                                        className="progress-fill danger"
-                                        style={{
-                                            width: `${metrics.undefendedBlockRate * 100}%`,
-                                        }}
-                                    />
-                                </div>
-                            </div>
-                            <div className="card">
-                                <h3
-                                    style={{
-                                        fontSize: "0.95rem",
-                                        fontWeight: 600,
-                                        marginBottom: "1rem",
-                                    }}
-                                >
-                                    🛡️ Defended Mode
-                                </h3>
-                                <div
-                                    style={{
-                                        fontSize: "2.5rem",
-                                        fontWeight: 700,
-                                        color: "var(--success)",
-                                        marginBottom: "0.5rem",
-                                    }}
-                                >
-                                    {Math.round(metrics.defendedBlockRate * 100)}%
-                                </div>
-                                <div
-                                    style={{
-                                        fontSize: "0.85rem",
-                                        color: "var(--text-secondary)",
-                                        marginBottom: "1rem",
-                                    }}
-                                >
-                                    Block Rate
-                                </div>
-                                <div className="progress-bar">
-                                    <div
-                                        className="progress-fill success"
-                                        style={{
-                                            width: `${metrics.defendedBlockRate * 100}%`,
-                                        }}
-                                    />
-                                </div>
-                            </div>
-                        </div>
-
-                        {/* Charts */}
-                        <ReportCharts metrics={metrics} />
-
-                        {/* Category Breakdown Table */}
-                        <div style={{ marginTop: "2rem", marginBottom: "2rem" }}>
-                            <h2
-                                style={{
-                                    fontSize: "1.2rem",
-                                    fontWeight: 600,
-                                    marginBottom: "1rem",
-                                }}
-                            >
-                                Category Breakdown
-                            </h2>
-                            <div className="table-container">
-                                <table>
-                                    <thead>
-                                        <tr>
-                                            <th>Category</th>
-                                            <th>Attacks</th>
-                                            <th>Blocked</th>
-                                            <th>Passed</th>
-                                            <th>Block Rate</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        {metrics.categories.map((cat) => (
-                                            <tr key={cat.name}>
-                                                <td style={{ fontWeight: 500 }}>{cat.name}</td>
-                                                <td>{cat.attacks}</td>
-                                                <td style={{ color: "var(--success)" }}>
-                                                    {cat.blocked}
-                                                </td>
-                                                <td style={{ color: "var(--danger)" }}>
-                                                    {cat.attacks - cat.blocked}
-                                                </td>
-                                                <td>
-                                                    <div
-                                                        style={{
-                                                            display: "flex",
-                                                            alignItems: "center",
-                                                            gap: "0.75rem",
-                                                        }}
-                                                    >
-                                                        <div
-                                                            className="progress-bar"
-                                                            style={{ width: "80px" }}
-                                                        >
-                                                            <div
-                                                                className={`progress-fill ${cat.blocked / cat.attacks > 0.7 ? "success" : "danger"}`}
-                                                                style={{
-                                                                    width: `${(cat.blocked / cat.attacks) * 100}%`,
-                                                                }}
-                                                            />
-                                                        </div>
-                                                        <span style={{ fontSize: "0.85rem" }}>
-                                                            {Math.round((cat.blocked / cat.attacks) * 100)}%
-                                                        </span>
-                                                    </div>
-                                                </td>
-                                            </tr>
-                                        ))}
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
-
-                        {/* Recommendations */}
-                        <div className="card" style={{ marginBottom: "2rem" }}>
-                            <h2
-                                style={{
-                                    fontSize: "1.2rem",
-                                    fontWeight: 600,
-                                    marginBottom: "1rem",
-                                }}
-                            >
-                                💡 Recommendations
-                            </h2>
-                            <ul
-                                style={{
-                                    listStyle: "none",
-                                    display: "flex",
-                                    flexDirection: "column",
-                                    gap: "0.75rem",
-                                }}
-                            >
-                                {metrics.recommendations.map((rec, i) => (
-                                    <li
-                                        key={i}
-                                        style={{
-                                            display: "flex",
-                                            gap: "0.75rem",
-                                            alignItems: "flex-start",
-                                            padding: "0.75rem 1rem",
-                                            background: "rgba(255,255,255,0.02)",
-                                            borderRadius: "var(--radius-sm)",
-                                            fontSize: "0.9rem",
-                                            color: "var(--text-secondary)",
-                                            lineHeight: 1.5,
-                                        }}
-                                    >
-                                        <span style={{ color: "var(--warning)" }}>⚡</span>
-                                        {rec}
-                                    </li>
-                                ))}
-                            </ul>
-                        </div>
+                            {sessions.length} session{sessions.length === 1 ? "" : "s"} —
+                            newest first
+                        </p>
+                        {sessions.map((s) => (
+                            <SessionCard key={s.runId} s={s} />
+                        ))}
                     </>
                 )}
             </div>
