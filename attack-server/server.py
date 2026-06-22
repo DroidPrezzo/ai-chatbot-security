@@ -123,6 +123,8 @@ OLLAMA_TIMEOUT_SECONDS = int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "60"))
 # Ask Ollama to keep the model resident in VRAM between calls (avoids paying
 # the model-load cost on every request). "-1" keeps it loaded indefinitely.
 OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "30m")
+# Cap generated tokens so a single verbose completion can't dominate a run.
+OLLAMA_NUM_PREDICT = int(os.getenv("OLLAMA_NUM_PREDICT", "512"))
 # How many scenarios may hit the model at once (keeps a small local model from
 # being swamped while still avoiding slow sequential execution).
 MAX_CONCURRENT_SCENARIOS = int(os.getenv("MAX_CONCURRENT_SCENARIOS", "3"))
@@ -245,6 +247,7 @@ async def query_ollama(prompt: str) -> str:
                     ],
                     "stream": False,
                     "keep_alive": OLLAMA_KEEP_ALIVE,
+                    "options": {"num_predict": OLLAMA_NUM_PREDICT},
                 },
             )
             res.raise_for_status()
