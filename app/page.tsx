@@ -1,5 +1,5 @@
-import Link from "next/link";
 import Nav from "@/components/Nav";
+import FeatureCard from "@/components/FeatureCard";
 
 export default function Home() {
     return (
@@ -23,38 +23,22 @@ export default function Home() {
                 {/* Feature Cards — each card links to its section */}
                 <div className="page-container">
                     <div className="feature-grid">
-                        <Link href="/chat" className="feature-card">
-                            <div className="feature-icon">💬</div>
-                            <h3 className="feature-title">AI Chatbot</h3>
-                            <p className="feature-description">
-                                Chat with phi3:mini in real-time. Toggle between defended and
-                                undefended modes to see how your security layer performs.
-                            </p>
-                        </Link>
-                        <Link href="/attacks" className="feature-card">
-                            <div className="feature-icon">🧪</div>
-                            <h3 className="feature-title">Attack Simulation</h3>
-                            <p className="feature-description">
-                                Run PyRIT-powered emoji injection attacks: obfuscation, Ecoji
-                                encoding, Unicode smuggling, and variation selector injection.
-                            </p>
-                        </Link>
-                        <Link href="/chat" className="feature-card">
-                            <div className="feature-icon">🛡️</div>
-                            <h3 className="feature-title">Defense Layer</h3>
-                            <p className="feature-description">
-                                Input sanitization middleware that strips emoji encoding,
-                                normalizes Unicode, and detects prompt injection patterns.
-                            </p>
-                        </Link>
-                        <Link href="/report" className="feature-card">
-                            <div className="feature-icon">📊</div>
-                            <h3 className="feature-title">Risk Report</h3>
-                            <p className="feature-description">
-                                Visual risk assessment with before/after defense comparisons,
-                                pass/fail rates, and actionable recommendations.
-                            </p>
-                        </Link>
+                        <FeatureCard href="/chat" icon="💬" title="AI Chatbot">
+                            Chat with phi3:mini in real-time. Toggle between defended and
+                            undefended modes to see how your security layer performs.
+                        </FeatureCard>
+                        <FeatureCard href="/attacks" icon="🧪" title="Attack Simulation">
+                            Run PyRIT-powered emoji injection attacks: obfuscation, Ecoji
+                            encoding, Unicode smuggling, and variation selector injection.
+                        </FeatureCard>
+                        <FeatureCard href="/chat" icon="🛡️" title="Defense Layer">
+                            Input sanitization middleware that strips emoji encoding,
+                            normalizes Unicode, and detects prompt injection patterns.
+                        </FeatureCard>
+                        <FeatureCard href="/report" icon="📊" title="Risk Report">
+                            Visual risk assessment with before/after defense comparisons,
+                            pass/fail rates, and actionable recommendations.
+                        </FeatureCard>
                     </div>
                 </div>
             </main>
