@@ -754,11 +754,16 @@ tr:hover td {
 }
 
 .feature-card {
+  display: block;
   background: var(--gradient-card);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-lg);
   padding: 2rem;
   transition: all 0.3s ease;
+  /* Cards are now links — reset anchor styling and signal interactivity. */
+  cursor: pointer;
+  color: inherit;
+  text-decoration: none;
 }
 
 .feature-card:hover {

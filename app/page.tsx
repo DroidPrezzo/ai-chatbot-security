@@ -18,54 +18,43 @@ export default function Home() {
                         injection attacks with PyRIT, deploy defense layers, and generate
                         risk reports — all in one dashboard.
                     </p>
-                    <div className="hero-actions">
-                        <Link href="/chat" className="btn btn-primary">
-                            💬 Open Chat
-                        </Link>
-                        <Link href="/attacks" className="btn btn-secondary">
-                            ⚡ Launch Attacks
-                        </Link>
-                        <Link href="/report" className="btn btn-secondary">
-                            📊 View Report
-                        </Link>
-                    </div>
                 </section>
 
-                {/* Feature Cards */}
+                {/* Feature Cards — each card links to its section */}
                 <div className="page-container">
                     <div className="feature-grid">
-                        <div className="feature-card">
+                        <Link href="/chat" className="feature-card">
                             <div className="feature-icon">💬</div>
                             <h3 className="feature-title">AI Chatbot</h3>
                             <p className="feature-description">
                                 Chat with phi3:mini in real-time. Toggle between defended and
                                 undefended modes to see how your security layer performs.
                             </p>
-                        </div>
-                        <div className="feature-card">
+                        </Link>
+                        <Link href="/attacks" className="feature-card">
                             <div className="feature-icon">🧪</div>
                             <h3 className="feature-title">Attack Simulation</h3>
                             <p className="feature-description">
                                 Run PyRIT-powered emoji injection attacks: obfuscation, Ecoji
                                 encoding, Unicode smuggling, and variation selector injection.
                             </p>
-                        </div>
-                        <div className="feature-card">
+                        </Link>
+                        <Link href="/chat" className="feature-card">
                             <div className="feature-icon">🛡️</div>
                             <h3 className="feature-title">Defense Layer</h3>
                             <p className="feature-description">
                                 Input sanitization middleware that strips emoji encoding,
                                 normalizes Unicode, and detects prompt injection patterns.
                             </p>
-                        </div>
-                        <div className="feature-card">
+                        </Link>
+                        <Link href="/report" className="feature-card">
                             <div className="feature-icon">📊</div>
                             <h3 className="feature-title">Risk Report</h3>
                             <p className="feature-description">
                                 Visual risk assessment with before/after defense comparisons,
                                 pass/fail rates, and actionable recommendations.
                             </p>
-                        </div>
+                        </Link>
                     </div>
                 </div>
             </main>
